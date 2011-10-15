@@ -1,9 +1,11 @@
 #!/bin/sh
-# Task management in Bash
+# Task Manager using Bash
+# Version: 0.1
 # Geoff Lewis <geoff@gslsrc.net> -- public domain 2011
 #
 # A very basic and quite specific (to my needs) task manager using bash and
-# sqlite3.  In the (unlikely) event it's work flow is applicable to you, enjoy!
+# sqlite3.  In the (unlikely) event it's work flow is applicable to you,
+# enjoy!
 #
 # See the README for some usage details.
 
@@ -887,6 +889,9 @@ print_centre() {
 
 ### END FUNCTIONS
 
+
+### MAIN BLOCK
+
 if [ ! -e $DATABASE ]; then
     init_db
 fi
@@ -895,11 +900,17 @@ TASK_ID=-1
 COMMAND="list"
 PARAM=""
 
-if [ $# -gt "0" ]; then
+# Parse the command line.
+if [ $# -gt 0 ]; then
+    # If the first word is numeric, treat it as a task number.  Else first
+    # word is the command.
     if [[ "$1" =~ [0-9]+ ]]; then
         TASK_ID=$1
         shift
-        if [ $# -gt "0" ]; then
+
+        # Second word is the command.  If task number but no command, default
+        # command is 'info'.
+        if [ $# -gt 0 ]; then
             COMMAND=$1
             shift
         else
@@ -921,9 +932,9 @@ if [ $# -gt "0" ]; then
     done
 fi
 
-echo "task=$TASK_ID"
-echo "cmd=$COMMAND"
-echo "param=$PARAM"
+#echo "task=$TASK_ID"
+#echo "cmd=$COMMAND"
+#echo "param=$PARAM"
 
 case "$COMMAND" in
     "add")
