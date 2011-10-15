@@ -1,11 +1,26 @@
 #!/bin/sh
+# Task management in Bash
+# Geoff Lewis <geoff@gslsrc.net> -- public domain 2011
+#
+# A very basic and quite specific (to my needs) task manager using bash and
+# sqlite3.  In the (unlikely) event it's work flow is applicable to you, enjoy!
+#
+# See the README for some usage details.
 
+### CONFIGURATION
+
+# Choose the day of the week on which to start the weekly report.  For my
+# current job timesheets are submitted on Thursday so the start of the week
+# for reporting is Friday.
 START_OF_WEEK=friday
 
-SQLITE=sqlite3
+# The location of the database file.  Defaults to ~/.tash.db
+DATABASE=$HOME/.$(basename $0 .sh).db
 
-SCRIPT_NAME=$(basename $0 .sh)
-DATABASE=$HOME/.${SCRIPT_NAME}.db
+## Probably no need to change the following settings...
+
+# The sqlite command.
+SQLITE=sqlite3
 
 STATUS_IN_PROGRESS="in_progress"
 STATUS_COMPLETE="complete"
@@ -14,6 +29,11 @@ OLD_IFS=$IFS              # Store the original IFS
 LINE_IFS=$'\x0A'$'\x0D'   # IFS for splitting query result into lines
 FIELD_IFS=\|              # IFS for splitting lines into fields
 
+### END CONFIGURATION
+
+
+### FUNCTIONS
+
 usage() {
     cat <<USAGE
 Usage: tasks.sh [task_num] [command] ...
@@ -21,11 +41,11 @@ Usage: tasks.sh [task_num] [command] ...
 Commands
     list [all|complete]    - shows a list of tasks
     add [@project] desc    - adds a task to the given project
-    [task_num] delete      - deletes a task and all its sessions
-    [task_num] start       - starts a session for the given task
-    [task_num] stop [durn] - stops a session with optional duration
-    [task_num] done [durn] - marks a task as complete
-    [task_num] info        - shows information for the given task
+    <task_num> delete      - deletes a task and all its sessions
+    <task_num> start       - starts a session for the given task
+    <task_num> stop [durn] - stops a session with optional duration
+    <task_num> done [durn] - marks a task as complete
+    <task_num> [info]      - shows information for the given task
     report [week]          - generate a weekly report
     cleanup                - discard all completed tasks
 
@@ -49,7 +69,12 @@ create table sessions (id INTEGER PRIMARY KEY,
 SQL
 }
 
-# For a given task, show its sessions.
+# Command: tash <task_num> [info]
+#
+# For the given task, show its information.  Shows a table of the task's
+# sessions and the total elapsed duration of the task.
+#
+# @param $1 the task number
 show_task() {
     local TASK_NUM=$1
     check_task_num "$TASK_NUM"
@@ -64,10 +89,14 @@ show_task() {
         exit
     fi
 
-    local TID=$(echo $RESULT | cut -d\| -f1)
-    local DESC=$(echo $RESULT | cut -d\| -f2)
-    local STATUS=$(echo $RESULT | cut -d\| -f3)
-    local PROJECT=$(echo $RESULT | cut -d\| -f4)
+    IFS=$FIELD_IFS
+    FIELDS=( $RESULT )
+    IFS=$OLD_IFS
+
+    local TID=${FIELDS[0]}
+    local DESC=${FIELDS[1]}
+    local STATUS=${FIELDS[2]}
+    local PROJECT=${FIELDS[3]}
 
     cat <<-INFO
    Task: $TASK_NUM
@@ -89,6 +118,13 @@ INFO
     sql "SELECT start,duration FROM sessions WHERE task=$TID ORDER BY start ASC"
     RESULT=$REPLY
 
+    # If no sessions, exit.
+    if [ "$RESULT" == "" ]; then
+        print_centre "NO SESSIONS" $COLUMNS
+        echo
+        exit
+    fi
+
     FORMAT=" %-21s | %s\n"
     printf "$FORMAT" "Started" "Duration"
 
@@ -97,6 +133,9 @@ INFO
 
     local NOW=$(date +%s)
     TOTAL_DURN=0
+
+    # Can use the default IFS to split $RESULT because each record contains no
+    # whitespace.
     for LINE in $RESULT
     do
         IFS=$FIELD_IFS
@@ -104,25 +143,27 @@ INFO
         IFS=$OLD_IFS
 
         START_SECS=${FIELDS[0]}
-        START=$(date --date="1970-01-01 UTC +$START_SECS secs" +"%a %d-%b-%Y %H:%M")
+        secs2date $START_SECS "%a %d-%b-%Y %H:%M"
+        START=$RESULT
 
         DURN=${FIELDS[1]}
-        FLAG=""
+        RUNNING=""
 
         # If session in progress (duration is zero) show elapsed time.
         if [ "$DURN" -eq 0 ]; then
             DURN=$(($NOW-$START_SECS))
-            FLAG=" *"
+            RUNNING=" *"
         fi
 
         format_duration $DURN
-        FMT_DURN="${REPLY}${FLAG}"
+        FMT_DURN="${REPLY}${RUNNING}"
 
         printf "$FORMAT" "$START" "$FMT_DURN"
 
         TOTAL_DURN=$(($TOTAL_DURN+$DURN))
     done
 
+    # Show the total elapsed time.
     echo $RULE
     format_duration $TOTAL_DURN
     FMT_TOTAL_DURN=$REPLY
@@ -130,12 +171,20 @@ INFO
     echo $RULE1
 }
 
+# Command: tash [list [complete|all|project]]
+#
+# Displays a table of tasks.  By default shows all 'in progress' tasks.  If
+# invoked with the 'list' command, you can display just the 'complete' tasks
+# or 'all' tasks.  Any other word passed with the 'list' command is treated as
+# a project name (so you shouldn't name projects 'complete' or 'all').
+#
+# @param $1 the type of tasks to display, either by status or project
 list_tasks() {
     local SQL="SELECT t.id,t.task_num,t.desc,p.name,t.status FROM tasks AS t
          LEFT JOIN projects AS p ON t.project=p.id"
 
     case "$1" in
-        'done' | 'complete' | 'completed')
+        'complete')
             SQL="$SQL WHERE status='$STATUS_COMPLETE'"
             ;;
         'all')
@@ -225,13 +274,13 @@ list_tasks() {
     for J in $( seq 0 $END ); do
         # Marker if task is in session (*) or complete (X)
         local TFLAG=" "
-        if [ "${AS[$J]}" -ne "0" ]; then
+        if [ "${AS[$J]}" -ne 0 ]; then
             TFLAG="*"
-        elif [ "${AC[$J]}" -eq "1" ]; then
+        elif [ "${AC[$J]}" -eq 1 ]; then
             TFLAG="X"
         fi
 
-        if [ "${AE[$J]}" -ne "0" ]; then
+        if [ "${AE[$J]}" -ne 0 ]; then
             format_duration ${AE[$J]}
             ELAPSED=$REPLY
         else
@@ -248,8 +297,16 @@ list_tasks() {
     done
 }
 
+# Command: tash report [week_offset]
+#
+# Displays the weekly timesheet report.  The first day of the report is given
+# by the $START_OF_WEEK value.  If no offset is given, the report is generated
+# for the current week starting from the preceding $START_OF_WEEK or today if
+# today matches $START_OF_WEEK.
+#
+# @param $1 the week offset, defaults to zero (current week)
 generate_report() {
-    local OFFSET=${1:0}
+    local OFFSET=${1:-0}
     local START=$(date --date="last $START_OF_WEEK -$OFFSET week")
 
     local END=$(date --date="$START +1 week" +%s)
@@ -258,10 +315,16 @@ generate_report() {
         END=$NOW
     fi
 
+    echo "Report for week starting" $(date --date="$START" '+%A, %d %B %Y')
+    echo
+
     FORMAT=" %5s | %2s%s | %5s | %s\n"
     printf "$FORMAT" "Time" "Tk." "" "Proj" "Description"
 
+    # Sets $COLUMNS
     get_columns
+
+    # Sets $RULE
     make_rule $COLUMNS "="
     echo "$RULE"
 
@@ -280,6 +343,9 @@ generate_report() {
 }
 
 # Shows task sessions for the given day.
+#
+# @param $1 the start of the day as text
+# @param $2 the start of the day in seconds
 generate_day_report() {
     local DATE=$(date --date="$1" '+%a %d-%b-%Y')
 
@@ -291,7 +357,7 @@ generate_day_report() {
         GROUP BY task"
     local RESULT=$REPLY
 
-    if [ "$REPLY" != "" ]; then
+    if [ "$RESULT" != "" ]; then
         echo " $DATE"
         echo "$RULE"
 
@@ -320,9 +386,24 @@ generate_day_report() {
 
             printf "$FORMAT" "$FDURN" "$TASK_NUM" "$PREFIX" "${PROJ:0:5}" "${DESC:0:$DESCMAX}"
         done
+
+        echo
     fi
 }
 
+# Command: tash add [@project] description of the task
+#
+# Adds a new task.  If the first word after the 'add' command starts with '@'
+# it is used as the project name, otherwise the task goes in the 'nameless'
+# project.  As the display rendering is very basic, the description should be
+# short (< 50 chars) and neither the project name nor description should not
+# contain '|' which is the field separator or single quotes (') because there
+# is no escaping of database input.  If the description contains bash special
+# characters (eg., '&'), it must be quoted.
+#
+# The task list is shown after the task is added.
+#
+# @param $1 the task description, including optional @project name
 add_task() {
     # If first word starts with '@', this is the project identifier
     local POS=$(expr match "$1" '@[a-zA-Z0-9]*')
@@ -377,10 +458,21 @@ add_task() {
     list_tasks
 }
 
+# Command: tash <task_num> rm
+#      or: tash rm <task_num1> <task_num2> ...
+#
+# Deletes a task and all its sessions from the database.  This is final.
+#
+# @param $1 a list of task numbers to delete
 del_task() {
     local DELETED=0
 
     for TASK_NUM in $1 ; do
+        # Ignore the default task_num if we invoked as 'tash rm X'
+        if [ "$TASK_NUM" -le 0 ]; then
+            continue;
+        fi
+
         if [[ "$TASK_NUM" =~ [0-9]+ ]]; then
             read -p "Delete task $TASK_NUM ? [Y/n] "
             case "$REPLY" in
@@ -409,7 +501,11 @@ del_task() {
     fi
 }
 
+# Command: tash <task_num> start
+#
 # Start a task (if not running).
+#
+# @param $1 the task to start
 start_task() {
     TASK_NUM=$1
     check_task_num $TASK_NUM
@@ -435,7 +531,16 @@ start_task() {
     fi
 }
 
-# Stops a task (if running).
+# Command: tash <task_num> stop [duration]
+#
+# Stops a task (if running).  If the optional duration is given, this is used
+# for the duration of the stopped session, otherwise the duration is
+# calculated from the current time.
+#
+# See parse_duration() for the duration format.
+#
+# @param $1 the task number
+# @param $2 [optional] duration of the session
 stop_task() {
     local TASK_NUM=$1
     local ELAPSED=$2
@@ -465,9 +570,15 @@ stop_task() {
     fi
 }
 
+# Command: tash <task_num> done [duration]
+#
 # Stops a task (if running) and marks as completed.
+#
+# @param $1 the task number
+# @param $2 [optional] duration of the session
 done_task() {
     local TASK_NUM=$1
+    local ELAPSED=$2
 
     check_task_num $TASK_NUM
 
@@ -496,8 +607,12 @@ done_task() {
     sql "UPDATE tasks SET status='$STATUS_COMPLETE' WHERE id=$TID;"
 }
 
-# Close a running session by setting the session duration.
-# Shared by stop_task() and done_task()
+# Close a running session by setting the session duration.  Used by
+# stop_task() and done_task().
+#
+# @param $1 the session id
+# @param $2 the session start time
+# @param $3 the optional session duration (else calculate duration to now)
 close_session() {
     local SID=$1      # Session id
     local START=$2    # Session start time
@@ -517,6 +632,8 @@ close_session() {
     REPLY=$DURATION
 }
 
+# Command: tash clean
+#
 # Delete completed tasks (after confirm) and recalculate task numbers.
 cleanup()
 {
@@ -609,7 +726,9 @@ cleanup()
 ### SUPPORT FUNCTIONS
 
 # Executes SQL statement(s).
-# Result is returned via $REPLY
+# 
+# @param $1 the SQL statement
+# @return $REPLY the SQL result
 sql() {
     local SQL="$1"
     #echo "$SQL"
@@ -617,9 +736,10 @@ sql() {
 }
 
 # Gets the maximum of a string's length or a number.
-# $1 - a string whose length is measured
-# $2 - a number representing the existing maximum
-# $REPLY - the maximum of ${#1} and $2
+#
+# @param $1 a string whose length is measured
+# @param $2 a number representing the existing maximum
+# @return $REPLY the maximum of ${#1} and $2
 maxlen() {
     if [ ${#1} -gt $2 ]; then
         REPLY=${#1}
@@ -629,12 +749,18 @@ maxlen() {
 }
 
 # Indicates whether the given task has a running session.
+#
+# @param $1 the task id
+# @return $REPLY the session id (positive int) if in session, else zero
 in_session() {
     sql "SELECT id FROM sessions WHERE task=$1 AND duration=0;"
     REPLY=${REPLY:=0}
 }
 
 # Gets the total elapsed time (in seconds) for a task.
+#
+# @param $1 the task id
+# @return $REPLY the total duration of all the task's sessions
 get_elapsed() {
     sql "SELECT duration FROM sessions WHERE task=$1 AND duration>0;"
 
@@ -646,6 +772,9 @@ get_elapsed() {
     REPLY=$SUM
 }
 
+# Abort if an invalid task number.
+#
+# @param $1 the task number to test
 check_task_num() {
     local TASK_NUM=$1
 
@@ -658,20 +787,23 @@ check_task_num() {
 # Parses a string to produce a duration in seconds.  The input string may be
 # of the format "Nx" where "N" is a number (integer or float) and "x" is an
 # optional type modifier: either "m" for minutes (default) or "h" for hours.
+#
+# @param $1 the duration string to parse
+# @return $REPLY the duration in seconds
 parse_duration() {
     local DURN=0
 
     # Check for duration in hours.
     # Allows fractional hours (eg., 1.5h = 90m)
     local UNIT=$(expr index "$1" h)
-    if [ "$UNIT" -ne "0" ]; then
+    if [ "$UNIT" -ne 0 ]; then
         # Convert hours to minutes
         DURN=$(echo "2k ${1:0:$UNIT-1} 60 *p" | dc)
 
     else
         # Check for duration in minutes (default)
         UNIT=$(expr index "$1" m)
-        if [ "$UNIT" -ne "0" ]; then
+        if [ "$UNIT" -ne 0 ]; then
             DURN="${1:0:$UNIT-1}"
         else
             DURN=$1
@@ -689,7 +821,9 @@ parse_duration() {
 }
 
 # Formats a duration in seconds into hours & minutes "HH:MM"
-# Sets $REPLY
+#
+# @param $1 the duration in seconds
+# @return $REPLY the formatted duration
 format_duration() {
     local DURN=$1
     local MINS=$(($DURN / 60))
@@ -706,14 +840,25 @@ format_duration() {
     REPLY=$(printf "%02d:%02d" "$HOURS" "$MINS")
 }
 
+# Converts epoch seconds to a formatted date string.
+#
+# @param $1 the epoch time in seconds
+# @param $2 the date format
+# @return $RESULT
+secs2date() {
+    RESULT=$(date --date="1970-01-01 UTC +$1 secs" +"$2")
+}
+
 # Gets the number of columns in the terminal.
-# Sets $COLUMNS
+#
+# @return $COLUMNS
 get_columns() {
     COLUMNS=$(stty -a | grep columns | cut -d\; -f3 | cut -d\  -f3)
 }
 
 # Creates a horizontal rule using a given character.
-# Sets $RULE
+#
+# @return $RULE
 make_rule() {
     local LEN=$1
     local C=$2
@@ -722,6 +867,22 @@ make_rule() {
     for JJ in $( seq 1 $LEN); do
         RULE="${RULE}${C}"
     done
+}
+
+# Prints the given text centred on the line.
+#
+# @param $1 the text to print
+# @param $2 [optional] the number of columns in the line
+print_centre() {
+    TEXT=$1
+    COLUMNS=$2
+    if [ "$COLUMNS" == "" ]; then
+        get_columns
+    fi
+
+    LEN=${#TEXT}
+    WIDTH=$(( $LEN + ($COLUMNS - $LEN) / 2 ))
+    printf "%${WIDTH}s\n" "$TEXT"
 }
 
 ### END FUNCTIONS
@@ -760,16 +921,16 @@ if [ $# -gt "0" ]; then
     done
 fi
 
-#echo "task=$TASK_ID"
-#echo "cmd=$COMMAND"
-#echo "param=$PARAM"
+echo "task=$TASK_ID"
+echo "cmd=$COMMAND"
+echo "param=$PARAM"
 
 case "$COMMAND" in
     "add")
         add_task "$PARAM"
         ;;
     "rm" | "remove" | "delete")
-        del_task "$TASK_ID" "$PARAM"
+        del_task "$TASK_ID $PARAM"
         ;;
     "start")
         start_task "$TASK_ID"
