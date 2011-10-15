@@ -1,0 +1,804 @@
+#!/bin/sh
+
+START_OF_WEEK=friday
+
+SQLITE=sqlite3
+
+SCRIPT_NAME=$(basename $0 .sh)
+DATABASE=$HOME/.${SCRIPT_NAME}.db
+
+STATUS_IN_PROGRESS="in_progress"
+STATUS_COMPLETE="complete"
+
+OLD_IFS=$IFS              # Store the original IFS
+LINE_IFS=$'\x0A'$'\x0D'   # IFS for splitting query result into lines
+FIELD_IFS=\|              # IFS for splitting lines into fields
+
+usage() {
+    cat <<USAGE
+Usage: tasks.sh [task_num] [command] ...
+
+Commands
+    list [all|complete]    - shows a list of tasks
+    add [@project] desc    - adds a task to the given project
+    [task_num] delete      - deletes a task and all its sessions
+    [task_num] start       - starts a session for the given task
+    [task_num] stop [durn] - stops a session with optional duration
+    [task_num] done [durn] - marks a task as complete
+    [task_num] info        - shows information for the given task
+    report [week]          - generate a weekly report
+    cleanup                - discard all completed tasks
+
+USAGE
+}
+
+init_db() {
+    echo "Creating $DATABASE"
+
+    $SQLITE $DATABASE <<-SQL
+create table projects (id INTEGER PRIMARY KEY, name);
+create table tasks (id INTEGER PRIMARY KEY,
+                    task_num INTEGER,
+                    desc,
+                    status,
+                    project INTEGER REFERENCES projects (id));
+create table sessions (id INTEGER PRIMARY KEY,
+                       task INTEGER REFERENCES tasks(id),
+                       start TIMESTAMP,
+                       duration INTEGER);
+SQL
+}
+
+# For a given task, show its sessions.
+show_task() {
+    local TASK_NUM=$1
+    check_task_num "$TASK_NUM"
+
+    sql "SELECT t.id,t.desc,t.status,p.name FROM tasks AS t
+        LEFT JOIN projects AS p ON p.id=t.project
+        WHERE t.task_num='$TASK_NUM'"
+    local RESULT=$REPLY
+
+    if [ "$RESULT" == "" ]; then
+        echo "No such task: $TASK_NUM"
+        exit
+    fi
+
+    local TID=$(echo $RESULT | cut -d\| -f1)
+    local DESC=$(echo $RESULT | cut -d\| -f2)
+    local STATUS=$(echo $RESULT | cut -d\| -f3)
+    local PROJECT=$(echo $RESULT | cut -d\| -f4)
+
+    cat <<-INFO
+   Task: $TASK_NUM
+Project: $PROJECT
+ Status: $STATUS
+INFO
+
+    # Sets $COLUMNS
+    get_columns
+
+    # Sets $RULE
+    make_rule $COLUMNS "-"
+    local RULE1=$RULE
+
+    echo
+    echo $DESC
+    echo $RULE1
+
+    sql "SELECT start,duration FROM sessions WHERE task=$TID ORDER BY start ASC"
+    RESULT=$REPLY
+
+    FORMAT=" %-21s | %s\n"
+    printf "$FORMAT" "Started" "Duration"
+
+    make_rule $COLUMNS "="
+    echo $RULE
+
+    local NOW=$(date +%s)
+    TOTAL_DURN=0
+    for LINE in $RESULT
+    do
+        IFS=$FIELD_IFS
+        FIELDS=( $LINE )
+        IFS=$OLD_IFS
+
+        START_SECS=${FIELDS[0]}
+        START=$(date --date="1970-01-01 UTC +$START_SECS secs" +"%a %d-%b-%Y %H:%M")
+
+        DURN=${FIELDS[1]}
+        FLAG=""
+
+        # If session in progress (duration is zero) show elapsed time.
+        if [ "$DURN" -eq 0 ]; then
+            DURN=$(($NOW-$START_SECS))
+            FLAG=" *"
+        fi
+
+        format_duration $DURN
+        FMT_DURN="${REPLY}${FLAG}"
+
+        printf "$FORMAT" "$START" "$FMT_DURN"
+
+        TOTAL_DURN=$(($TOTAL_DURN+$DURN))
+    done
+
+    echo $RULE
+    format_duration $TOTAL_DURN
+    FMT_TOTAL_DURN=$REPLY
+    printf "$FORMAT" "" "$FMT_TOTAL_DURN" 
+    echo $RULE1
+}
+
+list_tasks() {
+    local SQL="SELECT t.id,t.task_num,t.desc,p.name,t.status FROM tasks AS t
+         LEFT JOIN projects AS p ON t.project=p.id"
+
+    case "$1" in
+        'done' | 'complete' | 'completed')
+            SQL="$SQL WHERE status='$STATUS_COMPLETE'"
+            ;;
+        'all')
+            ;;
+        '')
+            SQL="$SQL WHERE status='$STATUS_IN_PROGRESS'"
+            ;;
+        *)
+            SQL="$SQL WHERE p.name='$1'"
+            ;;
+    esac
+
+    SQL="$SQL ORDER BY p.name ASC, t.task_num ASC;"
+
+    sql "$SQL"
+    local RESULT=$REPLY
+
+    # Collect id, task, project, description, etc. in arrays
+    local AI=()  # task id
+    local AT=()  # task num
+    local AP=()  # task project
+    local AD=()  # task description
+    local AE=()  # array of elapsed times
+    local AS=()  # array of current sessions
+    local AC=()  # 1=completed, 0=in_progress
+
+    # Keep track of the longest task and project name
+    local TMAX=2
+    local PMAX=5
+
+    IFS=$LINE_IFS
+
+    local I=0
+    for LINE in $RESULT
+    do
+        # Split the line into fields and restore the line separator IFS.
+        IFS=$FIELD_IFS
+        FIELDS=( $LINE )
+        IFS=$LINE_IFS
+
+        AI[$I]=${FIELDS[0]}
+        AT[$I]=${FIELDS[1]}
+        AD[$I]=${FIELDS[2]}
+        AP[$I]=${FIELDS[3]}
+
+        # Get the maximum task number length.
+        maxlen "${AT[$I]}" "$TMAX"
+        TMAX=$REPLY
+
+        # Get the maximum project name length.
+        maxlen "${AP[$I]}" "$PMAX"
+        PMAX=$REPLY
+
+        # Set the 'complete' flag.
+        if [ "${FIELDS[4]}" == "$STATUS_COMPLETE" ]; then
+            AC[$I]=1
+        else
+            AC[$I]=0
+        fi
+
+        get_elapsed ${AI[$I]}
+        AE[$I]=$REPLY
+
+        in_session ${AI[$I]}
+        AS[$I]=$REPLY
+
+        I=$(($I+1))
+    done
+
+    IFS=$OLD_IFS
+
+    local FORMAT="%s %${TMAX}s | %${PMAX}s | %5s | %s\n"
+
+    # Sets $COLUMNS
+    get_columns
+
+    # Sets $RULE
+    make_rule $COLUMNS "="
+
+    # Calculate the maximum columns available for the description.
+    DESCMAX=$(($COLUMNS - 4 - $TMAX - 3 - $PMAX - 9))
+
+    printf "$FORMAT" " " "Tk" "Pro." "Elap." "Description"
+    echo $RULE
+
+    END=$(($I-1))
+    for J in $( seq 0 $END ); do
+        # Marker if task is in session (*) or complete (X)
+        local TFLAG=" "
+        if [ "${AS[$J]}" -ne "0" ]; then
+            TFLAG="*"
+        elif [ "${AC[$J]}" -eq "1" ]; then
+            TFLAG="X"
+        fi
+
+        if [ "${AE[$J]}" -ne "0" ]; then
+            format_duration ${AE[$J]}
+            ELAPSED=$REPLY
+        else
+            ELAPSED=""
+        fi
+
+        if [ "${#AD[$J]}" -gt "$DESCMAX" ]; then
+            DESC=${AD[$J]:0:$DESCMAX}
+        else
+            DESC=${AD[$J]}
+        fi
+
+        printf "$FORMAT" "$TFLAG" "${AT[$J]}" "${AP[$J]}" "$ELAPSED" "$DESC"
+    done
+}
+
+generate_report() {
+    local OFFSET=${1:0}
+    local START=$(date --date="last $START_OF_WEEK -$OFFSET week")
+
+    local END=$(date --date="$START +1 week" +%s)
+    local NOW=$(date +%s)
+    if [ "$NOW" -lt "$END" ]; then
+        END=$NOW
+    fi
+
+    FORMAT=" %5s | %2s%s | %5s | %s\n"
+    printf "$FORMAT" "Time" "Tk." "" "Proj" "Description"
+
+    get_columns
+    make_rule $COLUMNS "="
+    echo "$RULE"
+
+    # Values for daily report
+    DESCMAX=$(($COLUMNS - 23))
+    make_rule $COLUMNS "-"
+
+    local TIME=$START
+    local TS=$(date --date="$TIME" +%s)
+    while [ "$TS" -lt "$END" ]; do
+        generate_day_report "$TIME" $TS
+
+        TIME=$(date --date="$TIME +1 day")
+        TS=$(date --date="$TIME" +%s)
+    done
+}
+
+# Shows task sessions for the given day.
+generate_day_report() {
+    local DATE=$(date --date="$1" '+%a %d-%b-%Y')
+
+    local START=$2
+    local END=$(($START+86400))
+
+    sql "SELECT task,SUM(duration) FROM sessions
+        WHERE start>=$START AND start<$END AND duration>0
+        GROUP BY task"
+    local RESULT=$REPLY
+
+    if [ "$REPLY" != "" ]; then
+        echo " $DATE"
+        echo "$RULE"
+
+        for LINE in $RESULT
+        do
+            local TID=$(echo $LINE | cut -d\| -f1)
+            local DURN=$(echo $LINE | cut -d\| -f2)
+
+            sql "SELECT t.task_num,p.name,t.desc,t.status
+                FROM tasks AS t
+                LEFT JOIN projects AS P on t.project=p.id
+                WHERE t.id=$TID;"
+
+            local TASK_NUM=$(echo $REPLY | cut -d\| -f1)
+            local PROJ=$(echo $REPLY | cut -d\| -f2)
+            local DESC=$(echo $REPLY | cut -d\| -f3)
+            local STATUS=$(echo $REPLY | cut -d\| -f4)
+
+            local PREFIX=" "
+            if [ "$STATUS" == "$STATUS_COMPLETE" ]; then
+                local PREFIX="X"
+            fi
+
+            format_duration $DURN
+            local FDURN=$REPLY
+
+            printf "$FORMAT" "$FDURN" "$TASK_NUM" "$PREFIX" "${PROJ:0:5}" "${DESC:0:$DESCMAX}"
+        done
+    fi
+}
+
+add_task() {
+    # If first word starts with '@', this is the project identifier
+    local POS=$(expr match "$1" '@[a-zA-Z0-9]*')
+
+    local PROJECT=""
+    local DESC=""
+    if [ "$POS" -gt "0" ]; then
+        PROJECT=${1:1:$POS-1}
+        DESC=${1:$POS+1}
+    else
+        # No project identifier: all text is the description.
+        DESC=$1
+    fi
+
+    # Remove quotes
+    local DESC=$(echo $DESC | tr -d \')
+
+    if [[ ! "$DESC" =~ [a-zA-Z0-9] ]]; then
+        echo "add: Description cannot be empty"
+        exit
+    fi
+
+    local SQL_GET_ID="SELECT id FROM projects WHERE name='$PROJECT';"
+    sql "$SQL_GET_ID"
+    local PID=$REPLY
+    if [ "$PID" == "" ]; then
+        sql "INSERT INTO projects (name) VALUES ('$PROJECT');"
+        sql "$SQL_GET_ID"
+        PID=$REPLY
+    fi
+
+    sql "SELECT count(*) FROM tasks WHERE desc='$DESC' AND project=$PID"
+    local COUNT=$REPLY
+    if [ "$COUNT" -gt 0 ]; then
+        echo "add: Task already exists '$DESC'"
+        exit
+    fi
+
+    sql "SELECT MAX(task_num) FROM tasks;"
+    local TASK_NUM=$(( $REPLY + 1 ))
+
+    sql "INSERT INTO tasks (task_num,desc,status,project)
+         VALUES ($TASK_NUM,'$DESC','$STATUS_IN_PROGRESS',$PID);"
+
+    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
+    local TID=$REPLY
+    if [ "$TID" == "" ]; then
+        echo "add: Failed to add task"
+        exit
+    fi
+
+    list_tasks
+}
+
+del_task() {
+    local DELETED=0
+
+    for TASK_NUM in $1 ; do
+        if [[ "$TASK_NUM" =~ [0-9]+ ]]; then
+            read -p "Delete task $TASK_NUM ? [Y/n] "
+            case "$REPLY" in
+                "Y" | "y" | "")
+                    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
+                    TID=$REPLY
+
+                    if [ "$TID" == "" ]; then
+                        echo "No such task $TASK_NUM"
+                    else
+                        sql "DELETE FROM tasks WHERE id=$TID;"
+                        sql "DELETE FROM sessions WHERE task=$TID;"
+
+                        DELETED=$(($DELETED+1))
+                    fi
+
+                    ;;
+                *)
+                    ;;
+            esac
+        fi
+    done
+
+    if [ "$DELETED" -gt 0 ]; then
+        list_tasks
+    fi
+}
+
+# Start a task (if not running).
+start_task() {
+    TASK_NUM=$1
+    check_task_num $TASK_NUM
+
+    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
+    TID=$REPLY
+
+    if [ "$TID" == "" ]; then
+        echo "No such task: $TASK_NUM"
+    else
+        sql "SELECT id FROM sessions WHERE task=$TID AND duration=0;"
+        SID=$REPLY
+
+        if [ "$SID" != "" ]; then
+            echo "Task $TASK_NUM already in progress"
+        else
+            START=$(date +%s)
+            sql "INSERT INTO sessions (task,start,duration)
+                    VALUES ($TID,$START,0);"
+
+            echo "Started task $TASK_NUM"
+        fi
+    fi
+}
+
+# Stops a task (if running).
+stop_task() {
+    local TASK_NUM=$1
+    local ELAPSED=$2
+
+    check_task_num $TASK_NUM
+
+    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
+    TID=$REPLY
+
+    if [ "$TID" == "" ]; then
+        echo "No such task: $TASK_NUM"
+    else
+        sql "SELECT id,start FROM sessions WHERE task=$TID AND duration=0;"
+
+        if [ "$REPLY" == "" ]; then
+            echo "Task $TASK_NUM not started"
+        else
+            local SID=$(echo $REPLY | cut -d\| -f1)
+            local START=$(echo $REPLY | cut -d\| -f2)
+
+            close_session $SID $START $ELAPSED
+            local DURATION=$REPLY
+
+            format_duration $DURATION
+            echo "Stopped task $TASK_NUM [$REPLY]"
+        fi
+    fi
+}
+
+# Stops a task (if running) and marks as completed.
+done_task() {
+    local TASK_NUM=$1
+
+    check_task_num $TASK_NUM
+
+    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
+    local TID=$REPLY
+
+    if [ "$TID" == "" ]; then
+        echo "No such task: $TASK_NUM"
+        exit
+    fi
+
+    sql "SELECT id,start FROM sessions WHERE task=$TID AND duration=0;"
+
+    # If task is still running, stop it first.
+    if [ "$REPLY" != "" ]; then
+        local SID=$(echo $REPLY | cut -d\| -f1)
+        local START=$(echo $REPLY | cut -d\| -f2)
+
+        close_session $SID $START $ELAPSED
+        local DURATION=$REPLY
+
+        format_duration $DURATION
+        echo "Stopped task $TASK_NUM [$REPLY]"
+    fi
+
+    sql "UPDATE tasks SET status='$STATUS_COMPLETE' WHERE id=$TID;"
+}
+
+# Close a running session by setting the session duration.
+# Shared by stop_task() and done_task()
+close_session() {
+    local SID=$1      # Session id
+    local START=$2    # Session start time
+    local ELAPSED=$3  # Optional session duration: see parse_duration()
+
+    local CURRENT=$(date +%s)
+    local DURATION=""
+
+    if [ "$ELAPSED" != "" ]; then
+        parse_duration "$ELAPSED"
+        DURATION=$REPLY
+    else
+        DURATION=$(($CURRENT-$START))
+    fi
+
+    sql "UPDATE sessions SET duration=$DURATION WHERE id=$SID;"
+    REPLY=$DURATION
+}
+
+# Delete completed tasks (after confirm) and recalculate task numbers.
+cleanup()
+{
+    sql "SELECT task_num,desc FROM tasks WHERE status='complete'"
+    if [ "$REPLY" == "" ]; then
+        echo "No completed tasks"
+        exit
+    fi
+
+    local RESULT="$REPLY"
+
+    local TMAX=2
+    local AT=()
+    local AD=()
+
+    local I=0
+
+    IFS=$LINE_IFS
+    for LINE in $RESULT
+    do
+        IFS=$FIELD_IFS
+        FIELDS=( $LINE )
+        IFS=$LINE_IFS
+
+        AT[$I]=${FIELDS[0]}
+        AD[$I]=${FIELDS[1]}
+
+        maxlen "${AT[$I]}" "$TMAX"
+        TMAX=$REPLY
+
+        I=$(($I+1))
+    done
+
+    IFS=$OLD_IFS
+
+    local FORMAT=" %${TMAX}s | %s\n"
+
+    echo "Discarding completed tasks..."
+    printf "$FORMAT" "Tk" "Description"
+
+    get_columns
+    make_rule $COLUMNS "="
+    echo $RULE
+
+    local DESCMAX=$((COLUMNS - $TMAX - 4))
+    local END=$(($I-1))
+    for J in $( seq 0 $END ); do
+        printf "$FORMAT" "${AT[$J]}" "${AD[$J]}"
+    done
+
+    make_rule $COLUMNS "-"
+    echo $RULE
+
+    read -p "Are you sure you want to delete these tasks? [y/N] "
+    case "$REPLY" in
+        "y" | "Y")
+            ;;
+        *)
+            exit
+            ;;
+    esac
+
+    # Delete sessions belonging to tasks about to be deleted.
+    sql "DELETE FROM sessions WHERE task IN
+        (SELECT id FROM tasks WHERE status='complete')"
+
+    # Delete tasks that have been completed.
+    sql "DELETE FROM tasks WHERE status='complete'"
+
+    # Delete projects for which there is not task.
+    sql "DELETE FROM projects WHERE id NOT IN
+        (SELECT DISTINCT project FROM tasks)"
+
+    # Select the tasks in the order we want task numbers allocated.
+    sql "SELECT t.id FROM tasks AS t
+        LEFT JOIN projects AS p ON t.project=p.id
+        ORDER BY p.name ASC, t.id ASC"
+
+    local TASK_NUM=1
+    for TID in $REPLY
+    do
+        sql "UPDATE tasks SET task_num=$TASK_NUM WHERE id=$TID"
+        TASK_NUM=$((TASK_NUM+1))
+    done
+
+    echo
+    echo "Deleted ${#AT[@]} tasks"
+}
+
+### SUPPORT FUNCTIONS
+
+# Executes SQL statement(s).
+# Result is returned via $REPLY
+sql() {
+    local SQL="$1"
+    #echo "$SQL"
+    REPLY="$($SQLITE $DATABASE "$SQL")"
+}
+
+# Gets the maximum of a string's length or a number.
+# $1 - a string whose length is measured
+# $2 - a number representing the existing maximum
+# $REPLY - the maximum of ${#1} and $2
+maxlen() {
+    if [ ${#1} -gt $2 ]; then
+        REPLY=${#1}
+    else
+        REPLY=$2
+    fi
+}
+
+# Indicates whether the given task has a running session.
+in_session() {
+    sql "SELECT id FROM sessions WHERE task=$1 AND duration=0;"
+    REPLY=${REPLY:=0}
+}
+
+# Gets the total elapsed time (in seconds) for a task.
+get_elapsed() {
+    sql "SELECT duration FROM sessions WHERE task=$1 AND duration>0;"
+
+    local SUM=0
+    for DURN in $REPLY; do
+        SUM=$(($SUM+$DURN))
+    done
+
+    REPLY=$SUM
+}
+
+check_task_num() {
+    local TASK_NUM=$1
+
+    if [[ ! $TASK_NUM =~ [0-9]+ ]]; then
+        echo "Invalid task number: $TASK_NUM"
+        exit
+    fi
+}
+
+# Parses a string to produce a duration in seconds.  The input string may be
+# of the format "Nx" where "N" is a number (integer or float) and "x" is an
+# optional type modifier: either "m" for minutes (default) or "h" for hours.
+parse_duration() {
+    local DURN=0
+
+    # Check for duration in hours.
+    # Allows fractional hours (eg., 1.5h = 90m)
+    local UNIT=$(expr index "$1" h)
+    if [ "$UNIT" -ne "0" ]; then
+        # Convert hours to minutes
+        DURN=$(echo "2k ${1:0:$UNIT-1} 60 *p" | dc)
+
+    else
+        # Check for duration in minutes (default)
+        UNIT=$(expr index "$1" m)
+        if [ "$UNIT" -ne "0" ]; then
+            DURN="${1:0:$UNIT-1}"
+        else
+            DURN=$1
+        fi
+    fi
+
+    if [[ ! "$DURN" =~ [0-9]+ ]]; then
+        echo "Invalid duration: $1"
+        exit
+    fi
+
+    # Convert minutes to seconds
+    local SECS=$(echo "$DURN 60 *p" | dc)
+    REPLY=$(printf "%.0f" "$SECS")
+}
+
+# Formats a duration in seconds into hours & minutes "HH:MM"
+# Sets $REPLY
+format_duration() {
+    local DURN=$1
+    local MINS=$(($DURN / 60))
+    local SECS=$(($DURN % 60))
+
+    if [ "$MINS" -ge 60 ]; then
+        HOURS=$(($MINS / 60))
+        MINS=$(($MINS % 60))
+    else
+        HOURS=0
+    fi
+
+    # Ignore seconds.
+    REPLY=$(printf "%02d:%02d" "$HOURS" "$MINS")
+}
+
+# Gets the number of columns in the terminal.
+# Sets $COLUMNS
+get_columns() {
+    COLUMNS=$(stty -a | grep columns | cut -d\; -f3 | cut -d\  -f3)
+}
+
+# Creates a horizontal rule using a given character.
+# Sets $RULE
+make_rule() {
+    local LEN=$1
+    local C=$2
+
+    RULE=""
+    for JJ in $( seq 1 $LEN); do
+        RULE="${RULE}${C}"
+    done
+}
+
+### END FUNCTIONS
+
+if [ ! -e $DATABASE ]; then
+    init_db
+fi
+
+TASK_ID=-1
+COMMAND="list"
+PARAM=""
+
+if [ $# -gt "0" ]; then
+    if [[ "$1" =~ [0-9]+ ]]; then
+        TASK_ID=$1
+        shift
+        if [ $# -gt "0" ]; then
+            COMMAND=$1
+            shift
+        else
+            COMMAND="info"
+        fi
+    else
+        COMMAND=$1
+        shift
+    fi
+
+    # Collect the remaining params in a single string.
+    until [ -z "$1" ]; do
+        if [ "$PARAM" == "" ]; then
+            PARAM="$1"
+        else
+            PARAM="$PARAM $1"
+        fi
+        shift
+    done
+fi
+
+#echo "task=$TASK_ID"
+#echo "cmd=$COMMAND"
+#echo "param=$PARAM"
+
+case "$COMMAND" in
+    "add")
+        add_task "$PARAM"
+        ;;
+    "rm" | "remove" | "delete")
+        del_task "$TASK_ID" "$PARAM"
+        ;;
+    "start")
+        start_task "$TASK_ID"
+        ;;
+    "stop")
+        stop_task "$TASK_ID" "$PARAM"
+        ;;
+    "done")
+        done_task "$TASK_ID" "$PARAM"
+        ;;
+    "info")
+        show_task "$TASK_ID"
+        ;;
+    "report")
+        generate_report "$PARAM"
+        ;;
+    "clean" | "cleanup")
+        cleanup
+        ;;
+    "list")
+        list_tasks "$PARAM"
+        ;;
+    "help" | "-?" | "-h")
+        usage
+        ;;
+    *)
+        echo "Error: Unknown command '$COMMAND'"
+        usage
+        ;;
+esac
+
+exit
