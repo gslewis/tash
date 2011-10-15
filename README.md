@@ -150,4 +150,4 @@ Licence
 This script is public domain (2011).  If you find any of it remotely useful,
 feel free to do with it what you will.
 
-Geoff Lewis <geoff@gslsrc.net>
+Geoff Lewis <gsl@gslsrc.net>
