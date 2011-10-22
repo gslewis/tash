@@ -510,16 +510,10 @@ cmd_del_task() {
 #
 # @param $1 the task to start
 cmd_start_task() {
-    TASK_NUM=$1
-    check_task_num $TASK_NUM
+    local TASK_NUM=$1
 
-    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
-    local TID=$REPLY
-
-    if [ "$TID" == "" ]; then
-        echo "No such task: $TASK_NUM"
-        exit
-    fi
+    # Sets $TID or dies
+    get_task_id "$TASK_NUM" "$STATUS_IN_PROGRESS"
 
     start__task "$TID"
 }
@@ -553,24 +547,52 @@ cmd_stop_task() {
 # given task.  Same as doing a "tash stop" followed by "tash <tn> start".
 # If there are no running tasks, it is the same as doing a "start".
 #
+# If you switch to the same task then in effect you close the running session
+# for the task and start a new session.  This is useful when using a duration
+# if you forget to stop a session and want to resume timing.
+#
 # @param $1 the task number to switch to
 # @param $2 [optional] duration of stopped sessions
 cmd_switch_task() {
     local TASK_NUM=$1
     local ELAPSED=$2
 
-    check_task_num $TASK_NUM
-
-    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
-    local TID=$REPLY
-
-    if [ "$TID" == "" ]; then
-        echo "No such task: $TASK_NUM"
-        exit
-    fi
+    # Sets $TID or dies
+    get_task_id "$TASK_NUM" "$STATUS_IN_PROGRESS"
 
     stop__all_tasks "$ELAPSED"
     start__task "$TID"
+}
+
+# Command: tash <task_num> session <duration>
+#
+# Creates a fixed session for the given task.  Use this when you fail to
+# start/stop a task to create a session.  Can be used on completed tasks.
+# The duration is mandatory and the start time is the current time.
+#
+# @param $1 the task number
+# @param $@ the session duration (required)
+cmd_session() {
+    local TASK_NUM=$1
+    local ELAPSED=$2
+
+    if [ "$ELAPSED" == "" ]; then
+        echo "Missing session duration"
+        exit
+    fi
+
+    # Sets $TID or dies
+    get_task_id "$TASK_NUM"
+
+    parse_duration "$ELAPSED"
+    DURATION=$REPLY
+
+    START=$(date +%s)
+    sql "INSERT INTO sessions (task,start,duration)
+        VALUES ($TID,$START,$DURATION);"
+
+    format_duration $DURATION
+    echo "Created session [$REPLY] for task $TASK_NUM"
 }
 
 # Used by start and switch commands.
@@ -624,13 +646,8 @@ stop__one_task() {
     local TASK_NUM=$1
     local ELAPSED=$2
 
-    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
-    local TID=$REPLY
-
-    if [ "$TID" == "" ]; then
-        echo "No such task: $TASK_NUM"
-        exit
-    fi
+    # Sets $TID or dies
+    get_task_id "$TASK_NUM" "$STATUS_IN_PROGRESS"
 
     sql "SELECT id,start FROM sessions WHERE task=$TID AND duration=0;"
 
@@ -658,15 +675,8 @@ cmd_done_task() {
     local TASK_NUM=$1
     local ELAPSED=$2
 
-    check_task_num $TASK_NUM
-
-    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
-    local TID=$REPLY
-
-    if [ "$TID" == "" ]; then
-        echo "No such task: $TASK_NUM"
-        exit
-    fi
+    # Sets $TID or dies
+    get_task_id "$TASK_NUM" "$STATUS_IN_PROGRESS"
 
     sql "SELECT id,start FROM sessions WHERE task=$TID AND duration=0;"
 
@@ -713,8 +723,7 @@ close_session() {
 # Command: tash clean
 #
 # Delete completed tasks (after confirm) and recalculate task numbers.
-cmd_cleanup()
-{
+cmd_cleanup() {
     sql "SELECT task_num,desc FROM tasks WHERE status='complete'"
     if [ "$REPLY" == "" ]; then
         echo "No completed tasks"
@@ -811,6 +820,40 @@ sql() {
     local SQL="$1"
     #echo "$SQL"
     REPLY="$($SQLITE $DATABASE "$SQL")"
+}
+
+# Gets the task id for a given task number.  Exits if there is no such task
+# number.  By default considers all tasks (in_progress & complete) unless the
+# second argument specifies the status.
+#
+# @param $1 the task number
+# @param $1 [optional] the task status
+#
+# @return $TID
+get_task_id() {
+    local TASK_NUM=$1
+    local TASK_STATUS=$2
+
+    check_task_num $TASK_NUM
+
+    SQL="SELECT id FROM tasks WHERE task_num=$TASK_NUM"
+    if [ "$TASK_STATUS" != "" ]; then
+        SQL="${SQL} AND status='$TASK_STATUS'"
+    fi
+    SQL="${SQL};"
+
+    sql "$SQL"
+
+    if [ "$REPLY" == "" ]; then
+        if [ "$TASK_STATUS" == "" ]; then
+            echo "No such task: $TASK_NUM"
+        else
+            echo "No such '$TASK_STATUS' task: $TASK_NUM"
+        fi
+        exit
+    fi
+
+    TID=$REPLY
 }
 
 # Gets the maximum of a string's length or a number.
@@ -1028,6 +1071,9 @@ case "$COMMAND" in
         ;;
     "switch" | "sw")
         cmd_switch_task "$TASK_NUM" "$PARAM"
+        ;;
+    "session")
+        cmd_session "$TASK_NUM" "$PARAM"
         ;;
     "done")
         cmd_done_task "$TASK_NUM" "$PARAM"

@@ -115,6 +115,17 @@ Synonyms for "switch": sw
 This is the same as doing a "stop all" followed by a "start".
 
 
+Recording a session:
+
+You can create a complete session with start time and duration using the
+"session" command.  This saves you from having to "start" and "stop" the task
+to generate the session.  In this case the duration is mandatory and the start
+time is the current time.
+
+> \# Create a 15 minute session for task number 5
+> tash 5 session 15m
+
+
 Completing a task:
 
 > \# For task number 5  
