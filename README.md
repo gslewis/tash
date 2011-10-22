@@ -1,7 +1,7 @@
 tash - Task Manager using Bash
 ==============================
 
-Version 0.1 - Sat 15 Oct 2011
+Version 0.2 - Sat 22 Oct 2011
 
 Geoff Lewis <http://github.com/gslewis/tash>
 
