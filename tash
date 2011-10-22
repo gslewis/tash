@@ -45,7 +45,7 @@ Commands
     add [@project] desc    - adds a task to the given project
     <task_num> delete      - deletes a task and all its sessions
     <task_num> start       - starts a session for the given task
-    <task_num> stop [durn] - stops a session with optional duration
+    [task_num] stop [durn] - stops session(s) with optional duration
     <task_num> done [durn] - marks a task as complete
     <task_num> [info]      - shows information for the given task
     report [week]          - generate a weekly report
@@ -541,13 +541,53 @@ start_task() {
 #
 # See parse_duration() for the duration format.
 #
-# @param $1 the task number
+# @param $1 the task number or -1 for all tasks
 # @param $2 [optional] duration of the session
 stop_task() {
     local TASK_NUM=$1
     local ELAPSED=$2
 
     check_task_num $TASK_NUM
+
+    if [ "$TASK_NUM" -eq "-1" ]; then
+        stop__all_tasks "$ELAPSED"
+    else
+        stop__one_task "$TASK_NUM" "$ELAPSED"
+    fi
+}
+
+# Stops all running tasks.  If an elapsed time is given, all sessions are stopped
+# with that duration, otherwise the duration is calculated per task using the
+# session start time and the current time.
+stop__all_tasks() {
+    local ELAPSED=$1
+
+    sql "SELECT s.id,s.start,t.task_num FROM sessions AS s
+        LEFT JOIN tasks AS t ON s.task=t.id WHERE s.duration=0;"
+    local RESULT=$REPLY
+
+    if [ "$RESULT" == "" ]; then
+        return
+    fi
+
+    for LINE in $RESULT; do
+        local SID=$(echo $LINE | cut -d\| -f1)
+        local START=$(echo $LINE | cut -d\| -f2)
+        local TASK_NUM=$(echo $LINE | cut -d\| -f3)
+
+        close_session $SID $START $ELAPSED
+        local DURATION=$REPLY
+
+        format_duration $DURATION
+        echo "Stopped task $TASK_NUM [$REPLY]"
+
+        SESSION_COUNT=$(($SESSION_COUNT+1))
+    done
+}
+
+stop__one_task() {
+    local TASK_NUM=$1
+    local ELAPSED=$2
 
     sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
     TID=$REPLY
@@ -935,6 +975,7 @@ fi
 #echo "task=$TASK_ID"
 #echo "cmd=$COMMAND"
 #echo "param=$PARAM"
+#exit
 
 case "$COMMAND" in
     "add")

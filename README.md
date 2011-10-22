@@ -90,6 +90,10 @@ Stopping a task:
 > tash 5 stop 30m  
 > \# Stop the session with a duration of 90 minutes  
 > tash 5 stop 1.5h  
+> \# Stop all running sessions
+> tash stop
+> \# Stop all running sessions with the given duration
+> tash stop 15m
 
 If no duration is given, the session duration is the actual duration -- the
 time elapsed between starting and stopping the task.  A stopped task can be
