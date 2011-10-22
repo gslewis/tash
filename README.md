@@ -100,6 +100,21 @@ time elapsed between starting and stopping the task.  A stopped task can be
 restarted, which creates a new session.
 
 
+Switching tasks:
+
+If you want to stop the current session(s) and start a session for a different
+task, use the "switch" command:
+
+> \# Switch to task number 5
+> tash 5 switch
+> \# Switch to task number 5, stopping the current session at 45 minutes
+> tash 5 switch 45m
+
+Synonyms for "switch": sw
+
+This is the same as doing a "stop all" followed by a "start".
+
+
 Completing a task:
 
 > \# For task number 5  
@@ -119,7 +134,7 @@ Deleting a task:
 > \# or to delete tasks 5 6 and 9  
 > tash delete 5 6 9  
 
-Synonyms for delete: rm & remove
+Synonyms for "delete": rm & remove
 
 Deleting a task removes it and all its sessions from the database.  If you
 have finished a task but still need to include it in reports, use the 'done'

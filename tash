@@ -41,15 +41,16 @@ usage() {
 Usage: tasks.sh [task_num] [command] ...
 
 Commands
-    list [all|complete]    - shows a list of tasks
-    add [@project] desc    - adds a task to the given project
-    <task_num> delete      - deletes a task and all its sessions
-    <task_num> start       - starts a session for the given task
-    [task_num] stop [durn] - stops session(s) with optional duration
-    <task_num> done [durn] - marks a task as complete
-    <task_num> [info]      - shows information for the given task
-    report [week]          - generate a weekly report
-    cleanup                - discard all completed tasks
+    list [all|complete]      - shows a list of tasks
+    add [@project] desc      - adds a task to the given project
+    <task_num> delete        - deletes a task and all its sessions
+    <task_num> start         - starts a session for the given task
+    [task_num] stop [durn]   - stops session(s) with optional duration
+    <task_num> switch [durn] - switches session to a new task
+    <task_num> done [durn]   - marks a task as complete
+    <task_num> [info]        - shows information for the given task
+    report [week]            - generate a weekly report
+    cleanup                  - discard all completed tasks
 
 USAGE
 }
@@ -77,7 +78,7 @@ SQL
 # sessions and the total elapsed duration of the task.
 #
 # @param $1 the task number
-show_task() {
+cmd_show_task() {
     local TASK_NUM=$1
     check_task_num "$TASK_NUM"
 
@@ -181,7 +182,7 @@ INFO
 # a project name (so you shouldn't name projects 'complete' or 'all').
 #
 # @param $1 the type of tasks to display, either by status or project
-list_tasks() {
+cmd_list_tasks() {
     local SQL="SELECT t.id,t.task_num,t.desc,p.name,t.status FROM tasks AS t
          LEFT JOIN projects AS p ON t.project=p.id"
 
@@ -307,7 +308,7 @@ list_tasks() {
 # today matches $START_OF_WEEK.
 #
 # @param $1 the week offset, defaults to zero (current week)
-generate_report() {
+cmd_report() {
     local OFFSET=${1:-0}
     local START=$(date --date="last $START_OF_WEEK -$OFFSET week")
 
@@ -337,7 +338,7 @@ generate_report() {
     local TIME=$START
     local TS=$(date --date="$TIME" +%s)
     while [ "$TS" -lt "$END" ]; do
-        generate_day_report "$TIME" $TS
+        report__daily "$TIME" $TS
 
         TIME=$(date --date="$TIME +1 day")
         TS=$(date --date="$TIME" +%s)
@@ -348,7 +349,7 @@ generate_report() {
 #
 # @param $1 the start of the day as text
 # @param $2 the start of the day in seconds
-generate_day_report() {
+report__daily() {
     local DATE=$(date --date="$1" '+%a %d-%b-%Y')
 
     local START=$2
@@ -406,7 +407,7 @@ generate_day_report() {
 # The task list is shown after the task is added.
 #
 # @param $1 the task description, including optional @project name
-add_task() {
+cmd_add_task() {
     # If first word starts with '@', this is the project identifier
     local POS=$(expr match "$1" '@[a-zA-Z0-9]*')
 
@@ -457,7 +458,7 @@ add_task() {
         exit
     fi
 
-    list_tasks
+    cmd_list_tasks
 }
 
 # Command: tash <task_num> rm
@@ -466,7 +467,7 @@ add_task() {
 # Deletes a task and all its sessions from the database.  This is final.
 #
 # @param $1 a list of task numbers to delete
-del_task() {
+cmd_del_task() {
     local DELETED=0
 
     for TASK_NUM in $1 ; do
@@ -499,7 +500,7 @@ del_task() {
     done
 
     if [ "$DELETED" -gt 0 ]; then
-        list_tasks
+        cmd_list_tasks
     fi
 }
 
@@ -508,29 +509,19 @@ del_task() {
 # Start a task (if not running).
 #
 # @param $1 the task to start
-start_task() {
+cmd_start_task() {
     TASK_NUM=$1
     check_task_num $TASK_NUM
 
     sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
-    TID=$REPLY
+    local TID=$REPLY
 
     if [ "$TID" == "" ]; then
         echo "No such task: $TASK_NUM"
-    else
-        sql "SELECT id FROM sessions WHERE task=$TID AND duration=0;"
-        SID=$REPLY
-
-        if [ "$SID" != "" ]; then
-            echo "Task $TASK_NUM already in progress"
-        else
-            START=$(date +%s)
-            sql "INSERT INTO sessions (task,start,duration)
-                    VALUES ($TID,$START,0);"
-
-            echo "Started task $TASK_NUM"
-        fi
+        exit
     fi
+
+    start__task "$TID"
 }
 
 # Command: tash <task_num> stop [duration]
@@ -543,7 +534,7 @@ start_task() {
 #
 # @param $1 the task number or -1 for all tasks
 # @param $2 [optional] duration of the session
-stop_task() {
+cmd_stop_task() {
     local TASK_NUM=$1
     local ELAPSED=$2
 
@@ -553,6 +544,50 @@ stop_task() {
         stop__all_tasks "$ELAPSED"
     else
         stop__one_task "$TASK_NUM" "$ELAPSED"
+    fi
+}
+
+# Command: tash <task_num> switch [duration]
+#
+# Stops all running tasks (with optional session duration) and starts the
+# given task.  Same as doing a "tash stop" followed by "tash <tn> start".
+# If there are no running tasks, it is the same as doing a "start".
+#
+# @param $1 the task number to switch to
+# @param $2 [optional] duration of stopped sessions
+cmd_switch_task() {
+    local TASK_NUM=$1
+    local ELAPSED=$2
+
+    check_task_num $TASK_NUM
+
+    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
+    local TID=$REPLY
+
+    if [ "$TID" == "" ]; then
+        echo "No such task: $TASK_NUM"
+        exit
+    fi
+
+    stop__all_tasks "$ELAPSED"
+    start__task "$TID"
+}
+
+# Used by start and switch commands.
+start__task() {
+    local TID=$1
+
+    sql "SELECT id FROM sessions WHERE task=$TID AND duration=0;"
+    SID=$REPLY
+
+    if [ "$SID" != "" ]; then
+        echo "Task $TASK_NUM already in progress"
+    else
+        START=$(date +%s)
+        sql "INSERT INTO sessions (task,start,duration)
+                VALUES ($TID,$START,0);"
+
+        echo "Started task $TASK_NUM"
     fi
 }
 
@@ -590,25 +625,26 @@ stop__one_task() {
     local ELAPSED=$2
 
     sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
-    TID=$REPLY
+    local TID=$REPLY
 
     if [ "$TID" == "" ]; then
         echo "No such task: $TASK_NUM"
+        exit
+    fi
+
+    sql "SELECT id,start FROM sessions WHERE task=$TID AND duration=0;"
+
+    if [ "$REPLY" == "" ]; then
+        echo "Task $TASK_NUM not started"
     else
-        sql "SELECT id,start FROM sessions WHERE task=$TID AND duration=0;"
+        local SID=$(echo $REPLY | cut -d\| -f1)
+        local START=$(echo $REPLY | cut -d\| -f2)
 
-        if [ "$REPLY" == "" ]; then
-            echo "Task $TASK_NUM not started"
-        else
-            local SID=$(echo $REPLY | cut -d\| -f1)
-            local START=$(echo $REPLY | cut -d\| -f2)
+        close_session $SID $START $ELAPSED
+        local DURATION=$REPLY
 
-            close_session $SID $START $ELAPSED
-            local DURATION=$REPLY
-
-            format_duration $DURATION
-            echo "Stopped task $TASK_NUM [$REPLY]"
-        fi
+        format_duration $DURATION
+        echo "Stopped task $TASK_NUM [$REPLY]"
     fi
 }
 
@@ -618,7 +654,7 @@ stop__one_task() {
 #
 # @param $1 the task number
 # @param $2 [optional] duration of the session
-done_task() {
+cmd_done_task() {
     local TASK_NUM=$1
     local ELAPSED=$2
 
@@ -650,7 +686,7 @@ done_task() {
 }
 
 # Close a running session by setting the session duration.  Used by
-# stop_task() and done_task().
+# cmd_stop_task() and cmd_done_task().
 #
 # @param $1 the session id
 # @param $2 the session start time
@@ -677,7 +713,7 @@ close_session() {
 # Command: tash clean
 #
 # Delete completed tasks (after confirm) and recalculate task numbers.
-cleanup()
+cmd_cleanup()
 {
     sql "SELECT task_num,desc FROM tasks WHERE status='complete'"
     if [ "$REPLY" == "" ]; then
@@ -936,7 +972,7 @@ if [ ! -e $DATABASE ]; then
     init_db
 fi
 
-TASK_ID=-1
+TASK_NUM=-1
 COMMAND="list"
 PARAM=""
 
@@ -945,7 +981,7 @@ if [ $# -gt 0 ]; then
     # If the first word is numeric, treat it as a task number.  Else first
     # word is the command.
     if [[ "$1" =~ [0-9]+ ]]; then
-        TASK_ID=$1
+        TASK_NUM=$1
         shift
 
         # Second word is the command.  If task number but no command, default
@@ -972,38 +1008,41 @@ if [ $# -gt 0 ]; then
     done
 fi
 
-#echo "task=$TASK_ID"
+#echo "task=$TASK_NUM"
 #echo "cmd=$COMMAND"
 #echo "param=$PARAM"
 #exit
 
 case "$COMMAND" in
     "add")
-        add_task "$PARAM"
+        cmd_add_task "$PARAM"
         ;;
-    "rm" | "remove" | "delete")
-        del_task "$TASK_ID $PARAM"
+    "delete" | "remove" | "rm")
+        cmd_del_task "$TASK_NUM $PARAM"
         ;;
     "start")
-        start_task "$TASK_ID"
+        cmd_start_task "$TASK_NUM"
         ;;
     "stop")
-        stop_task "$TASK_ID" "$PARAM"
+        cmd_stop_task "$TASK_NUM" "$PARAM"
+        ;;
+    "switch" | "sw")
+        cmd_switch_task "$TASK_NUM" "$PARAM"
         ;;
     "done")
-        done_task "$TASK_ID" "$PARAM"
+        cmd_done_task "$TASK_NUM" "$PARAM"
         ;;
     "info")
-        show_task "$TASK_ID"
+        cmd_show_task "$TASK_NUM"
         ;;
     "report")
-        generate_report "$PARAM"
+        cmd_report "$PARAM"
         ;;
     "clean" | "cleanup")
-        cleanup
+        cmd_cleanup
         ;;
     "list")
-        list_tasks "$PARAM"
+        cmd_list_tasks "$PARAM"
         ;;
     "help" | "-?" | "-h")
         usage
