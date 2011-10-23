@@ -90,10 +90,10 @@ Stopping a task:
 > tash 5 stop 30m  
 > \# Stop the session with a duration of 90 minutes  
 > tash 5 stop 1.5h  
-> \# Stop all running sessions
-> tash stop
-> \# Stop all running sessions with the given duration
-> tash stop 15m
+> \# Stop all running sessions  
+> tash stop  
+> \# Stop all running sessions with the given duration  
+> tash stop 15m  
 
 If no duration is given, the session duration is the actual duration -- the
 time elapsed between starting and stopping the task.  A stopped task can be
@@ -105,10 +105,10 @@ Switching tasks:
 If you want to stop the current session(s) and start a session for a different
 task, use the "switch" command:
 
-> \# Switch to task number 5
-> tash 5 switch
-> \# Switch to task number 5, stopping the current session at 45 minutes
-> tash 5 switch 45m
+> \# Switch to task number 5  
+> tash 5 switch  
+> \# Switch to task number 5, stopping the current session at 45 minutes  
+> tash 5 switch 45m  
 
 Synonyms for "switch": sw
 
@@ -123,7 +123,7 @@ to generate the session.  In this case the duration is mandatory and the start
 time is the current time.
 
 > \# Create a 15 minute session for task number 5
-> tash 5 session 15m
+> tash 5 session 15m  
 
 
 Completing a task:
