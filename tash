@@ -481,18 +481,13 @@ cmd_del_task() {
             read -p "Delete task $TASK_NUM ? [Y/n] "
             case "$REPLY" in
                 "Y" | "y" | "")
-                    sql "SELECT id FROM tasks WHERE task_num=$TASK_NUM;"
-                    TID=$REPLY
+                    # Sets $TID or dies
+                    get_task_id "$TASK_NUM"
 
-                    if [ "$TID" == "" ]; then
-                        echo "No such task $TASK_NUM"
-                    else
-                        sql "DELETE FROM tasks WHERE id=$TID;"
-                        sql "DELETE FROM sessions WHERE task=$TID;"
+                    sql "DELETE FROM tasks WHERE id=$TID;"
+                    sql "DELETE FROM sessions WHERE task=$TID;"
 
-                        DELETED=$(($DELETED+1))
-                    fi
-
+                    DELETED=$(($DELETED+1))
                     ;;
                 *)
                     ;;
@@ -516,7 +511,7 @@ cmd_start_task() {
     # Sets $TID or dies
     get_task_id "$TASK_NUM" "$STATUS_IN_PROGRESS"
 
-    start__task "$TID"
+    start__task "$TID" "$TASK_NUM"
 }
 
 # Command: tash <task_num> stop [duration]
@@ -562,7 +557,7 @@ cmd_switch_task() {
     get_task_id "$TASK_NUM" "$STATUS_IN_PROGRESS"
 
     stop__all_tasks "$ELAPSED"
-    start__task "$TID"
+    start__task "$TID" "$TASK_NUM"
 }
 
 # Command: tash <task_num> session <duration>
@@ -599,6 +594,7 @@ cmd_session() {
 # Used by start and switch commands.
 start__task() {
     local TID=$1
+    local TASK_NUM=$2
 
     sql "SELECT id FROM sessions WHERE task=$TID AND duration=0;"
     SID=$REPLY
@@ -638,8 +634,6 @@ stop__all_tasks() {
 
         format_duration $DURATION
         echo "Stopped task $TASK_NUM [$REPLY]"
-
-        SESSION_COUNT=$(($SESSION_COUNT+1))
     done
 }
 
@@ -707,13 +701,13 @@ close_session() {
     local START=$2    # Session start time
     local ELAPSED=$3  # Optional session duration: see parse_duration()
 
-    local CURRENT=$(date +%s)
     local DURATION=""
 
     if [ "$ELAPSED" != "" ]; then
         parse_duration "$ELAPSED"
         DURATION=$REPLY
     else
+        local CURRENT=$(date +%s)
         DURATION=$(($CURRENT-$START))
     fi
 
@@ -975,7 +969,7 @@ secs2date() {
 #
 # @return $COLUMNS
 get_columns() {
-    COLUMNS=$(stty -a | grep columns | cut -d\; -f3 | cut -d\  -f3)
+    COLUMNS=$(tput cols)
 }
 
 # Creates a horizontal rule using a given character.
