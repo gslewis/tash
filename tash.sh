@@ -719,7 +719,7 @@ close_session() {
 #
 # Delete completed tasks (after confirm) and recalculate task numbers.
 cmd_cleanup() {
-    sql "SELECT task_num,desc FROM tasks WHERE status='complete'"
+    sql "SELECT task_num,desc FROM tasks WHERE status='$STATUS_COMPLETE'"
     if [ "$REPLY" == "" ]; then
         echo "No completed tasks"
         exit
@@ -780,19 +780,19 @@ cmd_cleanup() {
 
     # Delete sessions belonging to tasks about to be deleted.
     sql "DELETE FROM sessions WHERE task IN
-        (SELECT id FROM tasks WHERE status='complete')"
+        (SELECT id FROM tasks WHERE status='$STATUS_COMPLETE');"
 
     # Delete tasks that have been completed.
-    sql "DELETE FROM tasks WHERE status='complete'"
+    sql "DELETE FROM tasks WHERE status='$STATUS_COMPLETE';"
 
     # Delete projects for which there is no task.
     sql "DELETE FROM projects WHERE id NOT IN
-        (SELECT DISTINCT project FROM tasks)"
+        (SELECT DISTINCT project FROM tasks);"
 
     # Select the tasks in the order we want task numbers allocated.
     sql "SELECT t.id FROM tasks AS t
         LEFT JOIN projects AS p ON t.project=p.id
-        ORDER BY p.name ASC, t.id ASC"
+        ORDER BY p.name ASC, t.id ASC;"
 
     local TASK_NUM=1
     for TID in $REPLY
