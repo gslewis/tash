@@ -84,7 +84,7 @@ SQL
         pid_sql = "SELECT id FROM projects WHERE name='#{project}';"
         pid = _query pid_sql
         if pid.empty?
-            _query "INSERT INTO projects (name) values ('#{project}');"
+            _query "INSERT INTO projects (name) VALUES ('#{project}');"
             pid = _query pid_sql
         end
 
@@ -109,7 +109,7 @@ SQL
         # include all param values
         tasks |= @param.split(' ') unless @param.empty?
         # discard anything not a positive integer
-        tasks.delete_if { |x| x !~ /^\d+$/ }
+        tasks.delete_if { |x| x !~ /^[1-9]\d*$/ }
 
         return if tasks.empty?
         tasks.sort!
@@ -237,7 +237,7 @@ SQL
     end
 
     def cmd_done
-        tid = _get_task_id(@task_num)
+        tid = _get_task_id(@task_num, Tash::STATUS_IN_PROGRESS)
 
         result = _query "SELECT id,start FROM sessions
                          WHERE task=#{tid} AND duration=0;"
@@ -266,11 +266,11 @@ SQL
 
         case list_type
         when 'complete'
-            sql << " WHERE status='#{Tash::STATUS_COMPLETE}'"
+            sql << " WHERE t.status='#{Tash::STATUS_COMPLETE}'"
         when 'all'
             # Do nothing
         when ''
-            sql << " WHERE status='#{Tash::STATUS_IN_PROGRESS}'"
+            sql << " WHERE t.status='#{Tash::STATUS_IN_PROGRESS}'"
         else
             sql << " WHERE p.name='#{list_type}'"
         end
