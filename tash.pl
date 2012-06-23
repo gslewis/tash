@@ -18,7 +18,6 @@ my $db = new tash::DB();
 $db->init();
 
 my $cmd = new tash::Command(@ARGV);
-#print Dumper($cmd);exit;
 $cmd->execute();
 
 package tash::Command;
@@ -60,6 +59,8 @@ sub new {
         $self->{'command'} = 'remove';
     } elsif (/^sw$/) {
         $self->{'command'} = 'switch';
+    } elsif (/^cleanup$/) {
+        $self->{'command'} = 'clean';
     }
 
     return bless($self, $class);
@@ -75,6 +76,8 @@ sub execute {
         $self->cmd_help();
         exit;
     }
+
+    return;
 }
 
 sub cmd_add {
@@ -113,6 +116,8 @@ sub cmd_add {
     );
 
     $self->_task_list('in_progress');
+
+    return;
 }
 
 sub cmd_remove {
@@ -130,13 +135,10 @@ sub cmd_remove {
     @tasks = sort { $a <=> $b } map(int, grep { /^[1-9]\d*$/ } @tasks);
 
     return unless @tasks;
-    #print tash::Dumper(\@tasks);
 
     my $deleted = 0;
     foreach my $task_num (@tasks) {
-        print "Delete task ${task_num} ? [Y/n] ";
-        my $response = readline(*STDIN);
-        chomp $response;
+        my $response = _prompt("Delete task ${task_num} ? [Y/n] ");
         next if length($response) and lc($response) ne 'y';
 
         eval {
@@ -155,6 +157,8 @@ sub cmd_remove {
     if ($deleted) {
         $self->_task_list('in_progress');
     }
+
+    return;
 }
 
 sub cmd_start {
@@ -162,6 +166,8 @@ sub cmd_start {
 
     my $tid = $db->get_task_id($self->{'task_num'});
     $self->_start_task($tid);
+
+    return;
 }
 
 sub cmd_stop {
@@ -172,6 +178,8 @@ sub cmd_stop {
     } else {
         $self->_stop_one_task();
     }
+
+    return;
 }
 
 sub cmd_switch {
@@ -181,6 +189,8 @@ sub cmd_switch {
 
     $self->_stop_all_tasks();
     $self->_start_task($tid);
+
+    return;
 }
 
 sub cmd_session {
@@ -198,6 +208,8 @@ sub cmd_session {
 
     my $f_durn = _format_duration($durn);
     say "Created session [$f_durn] for task $self->{'task_num'}";
+
+    return;
 }
 
 sub cmd_done {
@@ -220,12 +232,16 @@ sub cmd_done {
     $db->query(
         "UPDATE tasks SET status='$STATUS_COMPLETE' WHERE id=$tid;"
     );
+
+    return;
 }
 
 sub cmd_list {
     my $self = shift;
 
     $self->_task_list;
+
+    return;
 }
 
 sub cmd_info {
@@ -285,15 +301,20 @@ $desc
 write;
 
     say $rule1;
-    printf $format, 'Started', 'Duration';
+    printf($format, 'Started', 'Duration');
     say $rule2;
 
     for (@sessions) {
-        printf $format, _date_format($_->[0]), $_->[2];
+        printf($format,
+            _make_date('@' . $_->[0], '%a %d-%B-%Y %H:%M'),
+            $_->[2]
+        );
     }
     say $rule2;
-    printf $format, '', $total;
+    printf($format, '', $total);
     say $rule1;
+
+    return;
 }
 
 sub cmd_report {
@@ -310,9 +331,9 @@ sub cmd_report {
     my $format = " %5s | %2s%s | %5s | %s\n";
     my $cols = _get_cols();
 
-    print "Report for week starting ${f_start_date}\n";
+    say "Report for week starting ${f_start_date}";
     printf($format, 'Time', 'Tk.', '', 'Proj', 'Description');
-    print '=' x $cols, "\n";
+    say '=' x $cols;
 
     my $max_desc = $cols - 23;
     my $rule = '-' x $cols;
@@ -324,6 +345,8 @@ sub cmd_report {
 
         ($f_time, $time_sec) = _next_day($f_time);
     }
+
+    return;
 }
 
 sub _report_daily {
@@ -336,8 +359,8 @@ sub _report_daily {
         AND duration>0 GROUP BY task;");
     return unless $result;
 
-    print _make_date($time_f, '%a %d-%b-%Y'), "\n";
-    print "$rule\n";
+    say _make_date($time_f, '%a %d-%b-%Y');
+    say "$rule";
 
     my @lines = split /\n/, $result;
     foreach my $record (@lines) {
@@ -357,6 +380,76 @@ sub _report_daily {
             substr($desc, 0, $max_desc)
         );
     }
+
+    return;
+}
+
+sub cmd_clean {
+    my $self = shift;
+
+    my $result = $db->query("SELECT task_num,desc FROM tasks
+        WHERE status='$STATUS_COMPLETE';"
+    );
+
+    unless ($result) {
+        say "No completed tasks.";
+        return;
+    }
+
+    my $max_tasknum = 2;
+    my @tasks = ();
+    my @lines = split /\n/, $result;
+    foreach my $record (@lines) {
+        my @fields = split /\|/, $record;
+        push @tasks, \@fields;
+
+        $max_tasknum = _max(length($fields[0]), $max_tasknum);
+    }
+
+    my $format = "%${max_tasknum}s | %s\n";
+    my $cols = _get_cols();
+    my $rule1 = '-' x $cols;
+    my $rule2 = '=' x $cols;
+
+    say "Discarding completed tasks...";
+    printf($format, 'Tk', 'Description');
+    say $rule2;
+    foreach my $task_ref (@tasks) {
+        printf($format, @$task_ref);
+    }
+    say $rule1;
+
+    my $response = _prompt("Are you sure you want to delete these tasks? [y/N] ");
+    return unless length($response) && lc($response) eq 'y';
+
+    # Delete all sessions belonging to completed tasks.
+    $db->query("DELETE FROM sessions WHERE task IN
+        (SELECT id FROM tasks WHERE status='$STATUS_COMPLETE');"
+    );
+
+    # Delete all completed tasks.
+    $db->query("DELETE FROM tasks WHERE status='$STATUS_COMPLETE';");
+
+    # Delete all projects for which there is no tasks.
+    $db->query("DELETE FROM projects WHERE id NOT IN
+        (SELECT DISTINCT project FROM tasks);"
+    );
+
+    # Select remaining tasks in the order we want to allocate task nums.
+    my $result = $db->query("SELECT t.id FROM tasks AS t
+        LEFT JOIN projects AS p ON t.project=p.id
+        ORDER BY p.name ASC, t.id ASC;"
+    );
+
+    my $task_num = 1;
+    my @tids = map { int } split /\n/, $result;
+    foreach my $tid (@tids) {
+        $db->query("UPDATE tasks SET task_num=${task_num} WHERE id=${tid};");
+
+        ++$task_num;
+    }
+
+    return;
 }
 
 sub cmd_help {
@@ -379,6 +472,8 @@ Commands
     cleanup                   - discard all completed tasks
 
 USAGE
+
+    return;
 }
 
 sub _task_list {
@@ -430,7 +525,7 @@ sub _task_list {
     my $format = "%s %${max_task_num}s | %${max_project}s | %4s | %s\n";
     my $max_desc = $cols - 4 - $max_task_num -3 - $max_project - 9;
 
-    printf $format, ' ', 'Tk', 'Pro.', 'Elap.', 'Description';
+    printf($format, ' ', 'Tk', 'Pro.', 'Elap.', 'Description');
     say $rule;
 
     for (@tasks) {
@@ -445,8 +540,10 @@ sub _task_list {
         my $desc = length($_->[2]) > $max_desc
                         ? substr($_->[2], 0, $max_desc) : $_->[2];
 
-        printf $format, $marker, $_->[1], $_->[3], $elapsed, $desc;
+        printf($format, $marker, $_->[1], $_->[3], $elapsed, $desc);
     }
+
+    return;
 }
 
 sub _get_elapsed {
@@ -492,6 +589,8 @@ sub _start_task {
     );
 
     say "Started task $task_num";
+
+    return;
 }
 
 sub _stop_all_tasks {
@@ -510,6 +609,8 @@ sub _stop_all_tasks {
 
         _stop_session($task_num, $sid, $start, $elapsed);
     }
+
+    return;
 }
 
 sub _stop_one_task {
@@ -527,6 +628,8 @@ sub _stop_one_task {
     my ($sid, $start) = map(int, split /\|/, $result);
 
     _stop_session($task_num, $sid, $start, $elapsed);
+
+    return;
 }
 
 sub _stop_session {
@@ -536,6 +639,8 @@ sub _stop_session {
     my $f_durn = _format_duration($durn);
 
     say "Stopped task $task_num [$f_durn]";
+
+    return;
 }
 
 sub _close_session {
@@ -560,7 +665,7 @@ sub _format_duration {
         $mins = $mins % 60;
     }
 
-    return sprintf '%02d:%02d', $hours, $mins
+    return sprintf('%02d:%02d', $hours, $mins);
 }
 
 sub _parse_duration {
@@ -587,19 +692,17 @@ sub _max {
 }
 
 sub _get_cols {
-    int(qx/tput cols/);
+    return int(qx/tput cols/);
 }
 
-sub _date_format {
-    my @t = localtime(shift);
+sub _prompt {
+    my $prompt = shift;
 
-    my @wdays = qw(Sun Mon Tue Wed Thu Fri Sat);
-    my @months = qw(Jan Feb Mar Apr May Jun Jul Sep Oct Nov Dec);
+    print $prompt;
+    my $response = readline(*STDIN);
+    chomp $response;
 
-    my $format = "%s %02d-%s-%d %02d:%02d";
-
-    sprintf $format,
-        $wdays[$t[6]], $t[3], $months[$t[4]], (1900 + $t[5]), $t[2], $t[1];
+    return $response;
 }
 
 sub _make_date {

@@ -499,7 +499,7 @@ NO SESSIONS
         # Delete all completed tasks.
         _query "DELETE FROM tasks WHERE status='#{Tash::STATUS_COMPLETE}';"
 
-        # Delete all projects for which there is not task.
+        # Delete all projects for which there is no task.
         _query "DELETE FROM projects WHERE id NOT IN
             (SELECT DISTINCT project FROM tasks);"
 
