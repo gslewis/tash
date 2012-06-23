@@ -3,13 +3,16 @@
 package tash;
 
 use strict;
+use warnings;
 use feature ':5.12';
 
 use Data::Dumper;
 
-our ($STATUS_IN_PROGRESS, $STATUS_COMPLETE);
-$STATUS_IN_PROGRESS = 'in_progress';
-$STATUS_COMPLETE = 'complete';
+our ($STATUS_IN_PROGRESS, $STATUS_COMPLETE) = ('in_progress', 'complete');
+
+# Set the first day of the week for weekly reports.  If timesheets are
+# submitted on Thursday, the week starts on the following Friday.
+our $START_OF_WEEK = 'friday';
 
 my $db = new tash::DB();
 $db->init();
@@ -49,6 +52,7 @@ sub new {
         $self->{'param'} =~ s/'//;     # strip single quotes (saves escaping)
     }
 
+    # Translate command aliases to their canonical name.
     local $_ = $self->{'command'};
     if (/-[?h]/) {
         $self->{'command'} = 'help';
@@ -108,7 +112,7 @@ sub cmd_add {
         ($task_num,'$desc','${STATUS_IN_PROGRESS}',$pid);"
     );
 
-    $self->_task_list;
+    $self->_task_list('in_progress');
 }
 
 sub cmd_remove {
@@ -149,7 +153,7 @@ sub cmd_remove {
     }
 
     if ($deleted) {
-        $self->_task_list;
+        $self->_task_list('in_progress');
     }
 }
 
@@ -185,14 +189,14 @@ sub cmd_session {
     die "Missing session duration\n" unless $self->{'param'};
 
     my $tid = $db->get_task_id($self->{'task_num'});
-    my $durn = $self->_parse_duration($self->{'param'});
+    my $durn = _parse_duration($self->{'param'});
     my $start = time;
 
     $db->query(
         "INSERT INTO sessions (task,start,duration) VALUES ($tid,$start,$durn);"
     );
 
-    my $f_durn = $self->_format_duration($durn);
+    my $f_durn = _format_duration($durn);
     say "Created session [$f_durn] for task $self->{'task_num'}";
 }
 
@@ -209,8 +213,7 @@ sub cmd_done {
         foreach (split /\n/, $result) {
             my ($sid, $start) = map(int, split /\|/);
 
-            $self->_stop_session($self->{'task_num'}, $sid, $start,
-                                 $self->{'param'});
+            _stop_session($self->{'task_num'}, $sid, $start, $self->{'param'});
         }
     }
 
@@ -253,13 +256,13 @@ sub cmd_info {
     foreach (@sessions) {
         if ($_->[1] == 0) {
             $_->[1] = $now - $_->[0];
-            push @$_, $self->_format_duration($_->[1]) . '*';
+            push @$_, _format_duration($_->[1]) . '*';
         } else {
-            push @$_, $self->_format_duration($_->[1]);
+            push @$_, _format_duration($_->[1]);
         }
         $total += $_->[1];
     }
-    $total = $self->_format_duration($total);
+    $total = _format_duration($total);
 
     #print tash::Dumper(\@sessions);exit;
 
@@ -293,10 +296,89 @@ write;
     say $rule1;
 }
 
+sub cmd_report {
+    my $self = shift;
+
+    my $offset = $self->{'param'} || 0;
+
+    my $start_date = _make_date("last $START_OF_WEEK -${offset} week");
+
+    my $end_secs = _date_to_secs("${start_date} +1 week");
+
+    my $f_start_date = _make_date("${start_date}", '%A, %d %B %Y');
+
+    my $format = " %5s | %2s%s | %5s | %s\n";
+    my $cols = _get_cols();
+
+    print "Report for week starting ${f_start_date}\n";
+    printf($format, 'Time', 'Tk.', '', 'Proj', 'Description');
+    print '=' x $cols, "\n";
+
+    my $max_desc = $cols - 23;
+    my $rule = '-' x $cols;
+
+    my $f_time = $start_date;
+    my $time_sec = _date_to_secs($start_date);
+    while ($time_sec < $end_secs) {
+        _report_daily($f_time, $time_sec, $format, $rule, $max_desc);
+
+        ($f_time, $time_sec) = _next_day($f_time);
+    }
+}
+
+sub _report_daily {
+    my ($time_f, $time_start, $format, $rule, $max_desc) = @_;
+
+    my $time_end = $time_start + 86400;
+
+    my $result = $db->query("SELECT task,SUM(duration) FROM sessions
+        WHERE start>=${time_start} AND start<${time_end}
+        AND duration>0 GROUP BY task;");
+    return unless $result;
+
+    print _make_date($time_f, '%a %d-%b-%Y'), "\n";
+    print "$rule\n";
+
+    my @lines = split /\n/, $result;
+    foreach my $record (@lines) {
+        my ($tid, $durn) = map { int } split /\|/, $record;
+
+        my $task_info = $db->query("SELECT t.task_num,p.name,t.desc,t.status
+            FROM tasks AS t LEFT JOIN projects AS p ON t.project=p.id
+            WHERE t.id=${tid};"
+        );
+
+        my ($task_num, $project, $desc, $status) = split /\|/, $task_info;
+        my $prefix = $status eq $STATUS_COMPLETE ? 'X' : ' ';
+        my $f_durn = _format_duration($durn);
+
+        printf($format, $f_durn, $task_num, $prefix,
+            substr($project, 0, 5),
+            substr($desc, 0, $max_desc)
+        );
+    }
+}
+
 sub cmd_help {
     my $self = shift;
 
-    say "usage";
+    print <<USAGE;
+Usage: perl ${0} [task_num] [command] ...
+
+Commands
+    list [all|complete]       - shows a list of tasks
+    add [\@project] desc       - adds a task to the given project
+    <task_num> delete         - deletes a task and all its sessions
+    <task_num> start          - starts a session for the given task
+    [task_num] stop [durn]    - stops session(s) with optional duration
+    <task_num> session <durn> - creates a session
+    <task_num> switch [durn]  - switches session to a new task
+    <task_num> done [durn]    - marks a task as complete
+    <task_num> [info]         - shows information for the given task
+    report [week]             - generate a weekly report
+    cleanup                   - discard all completed tasks
+
+USAGE
 }
 
 sub _task_list {
@@ -315,7 +397,7 @@ sub _task_list {
             $sql .= " WHERE t.status='$STATUS_COMPLETE'";
         }
         when ('all') {}
-        when ('') {
+        when ($_ eq '' || $_ eq 'in_progress') {
             $sql .= " WHERE t.status='$STATUS_IN_PROGRESS'";
         }
         default {
@@ -359,7 +441,7 @@ sub _task_list {
             $marker = 'X';
         }
 
-        my $elapsed = $self->_format_duration($_->[5]);
+        my $elapsed = _format_duration($_->[5]);
         my $desc = length($_->[2]) > $max_desc
                         ? substr($_->[2], 0, $max_desc) : $_->[2];
 
@@ -426,7 +508,7 @@ sub _stop_all_tasks {
     foreach (split /\n/, $result) {
         my ($sid, $start, $task_num) = split /\|/;
 
-        $self->_stop_session($task_num, $sid, $start, $elapsed);
+        _stop_session($task_num, $sid, $start, $elapsed);
     }
 }
 
@@ -444,22 +526,22 @@ sub _stop_one_task {
 
     my ($sid, $start) = map(int, split /\|/, $result);
 
-    $self->_stop_session($task_num, $sid, $start, $elapsed);
+    _stop_session($task_num, $sid, $start, $elapsed);
 }
 
 sub _stop_session {
-    my ($self, $task_num, $sid, $start, $elapsed) = @_;
+    my ($task_num, $sid, $start, $elapsed) = @_;
 
-    my $durn = $self->_close_session($sid, $start, $elapsed);
-    my $f_durn = $self->_format_duration($durn);
+    my $durn = _close_session($sid, $start, $elapsed);
+    my $f_durn = _format_duration($durn);
 
     say "Stopped task $task_num [$f_durn]";
 }
 
 sub _close_session {
-    my ($self, $sid, $start, $elapsed) = @_;
+    my ($sid, $start, $elapsed) = @_;
 
-    my $durn = $elapsed ? $self->_parse_duration($elapsed) : (time - $start);
+    my $durn = $elapsed ? _parse_duration($elapsed) : (time - $start);
 
     $db->query("UPDATE sessions SET duration=$durn WHERE id=$sid;");
 
@@ -467,7 +549,6 @@ sub _close_session {
 }
 
 sub _format_duration {
-    my $self = shift;
     my $i_secs = shift;
 
     my $mins = $i_secs / 60;
@@ -483,7 +564,6 @@ sub _format_duration {
 }
 
 sub _parse_duration {
-    my $self = shift;
     my $s_durn = shift;
 
     unless ($s_durn =~ /^(\d+(?:\.\d+)?)([hm])?$/i) {
@@ -520,6 +600,36 @@ sub _date_format {
 
     sprintf $format,
         $wdays[$t[6]], $t[3], $months[$t[4]], (1900 + $t[5]), $t[2], $t[1];
+}
+
+sub _make_date {
+    my $date_string = shift;
+    my $date_format = shift;
+
+    my $cmd = "date --date=\"${date_string}\"";
+    if ($date_format) {
+        $cmd .= " \"+${date_format}\"";
+    }
+
+    my $date = qx($cmd);
+    chomp $date;
+
+    return $date;
+}
+
+sub _date_to_secs {
+    my $date_string = shift;
+
+    return _make_date($date_string, '%s');
+}
+
+sub _next_day {
+    my $start_time = shift;
+
+    my $f_time = _make_date("${start_time} +1 day");
+    my $time_secs = _date_to_secs($f_time);
+
+    return ( $f_time, $time_secs );
 }
 
 package tash::DB;
