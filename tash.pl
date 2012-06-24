@@ -94,14 +94,14 @@ sub cmd_add {
     }
 
     die "Description cannot be empty\n" unless scalar($desc);
-    
+
     my $pid_sql = "SELECT id FROM projects WHERE name='${project}';";
     my $pid = $db->query($pid_sql);
     unless (scalar($pid)) {
         $db->query("INSERT INTO projects (name) VALUES ('${project}');");
         $pid = $db->query($pid_sql);
     }
-    
+
     my $count = $db->query(
         "SELECT count(*) FROM tasks WHERE desc='${desc}' AND project=$pid;"
     );
