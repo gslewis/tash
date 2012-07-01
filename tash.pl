@@ -2,11 +2,9 @@
 
 package tash;
 
+use 5.010;
 use strict;
 use warnings;
-use feature ':5.12';
-
-use Data::Dumper;
 
 our ($STATUS_IN_PROGRESS, $STATUS_COMPLETE) = ('in_progress', 'complete');
 
@@ -306,7 +304,7 @@ write;
 
     for (@sessions) {
         printf($format,
-            _make_date('@' . $_->[0], '%a %d-%B-%Y %H:%M'),
+            _make_date('@' . $_->[0], '%a %d-%b-%Y %H:%M'),
             $_->[2]
         );
     }
@@ -387,18 +385,18 @@ sub _report_daily {
 sub cmd_clean {
     my $self = shift;
 
-    my $result = $db->query("SELECT task_num,desc FROM tasks
+    my $completed_tasks = $db->query("SELECT task_num,desc FROM tasks
         WHERE status='$STATUS_COMPLETE';"
     );
 
-    unless ($result) {
+    unless ($completed_tasks) {
         say "No completed tasks.";
         return;
     }
 
     my $max_tasknum = 2;
     my @tasks = ();
-    my @lines = split /\n/, $result;
+    my @lines = split /\n/, $completed_tasks;
     foreach my $record (@lines) {
         my @fields = split /\|/, $record;
         push @tasks, \@fields;
@@ -419,7 +417,9 @@ sub cmd_clean {
     }
     say $rule1;
 
-    my $response = _prompt("Are you sure you want to delete these tasks? [y/N] ");
+    my $response = _prompt(
+        "Are you sure you want to delete these tasks? [y/N] "
+    );
     return unless length($response) && lc($response) eq 'y';
 
     # Delete all sessions belonging to completed tasks.
@@ -436,13 +436,13 @@ sub cmd_clean {
     );
 
     # Select remaining tasks in the order we want to allocate task nums.
-    my $result = $db->query("SELECT t.id FROM tasks AS t
+    my $remaining_tasks = $db->query("SELECT t.id FROM tasks AS t
         LEFT JOIN projects AS p ON t.project=p.id
         ORDER BY p.name ASC, t.id ASC;"
     );
 
     my $task_num = 1;
-    my @tids = map { int } split /\n/, $result;
+    my @tids = map { int } split /\n/, $remaining_tasks;
     foreach my $tid (@tids) {
         $db->query("UPDATE tasks SET task_num=${task_num} WHERE id=${tid};");
 
